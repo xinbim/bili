@@ -1,5 +1,6 @@
 import math
 import re
+import random
 from time import sleep
 from client.senior import captcha_get, captcha_submit, category_get, question_get, question_submit, question_result
 from tools.logger import logger
@@ -19,12 +20,14 @@ class QuizSession:
         self.question = None
         self.current_score = 0
         self.category = None
+        self.unrecognized_count = 0
 
     def start(self):
         """开始答题会话"""
         try:
             while self.question_num < 100:
                 retry_count = 1
+                self.unrecognized_count = 0
                 if not self.get_question():
                     logger.error("获取题目失败")
                     return
@@ -40,22 +43,33 @@ class QuizSession:
                     llm = OpenAIAPI()
                 else:
                     llm = DeepSeekAPI()
-                try:
-                    answer = str(llm.ask(self.get_question_prompt())).strip()
-                except Exception as e:
-                    logger.error(f"AI回答问题时发生错误: {str(e)}")
-                    sleep_time = math.pow(2, retry_count + 1);
-                    logger.info(f"正在重试({sleep_time:.0f}s)...")
-                    sleep(sleep_time)
-                    retry_count += 1
-                    if retry_count > 7:
-                        logger.error("重试次数过多，程序终止，请检查配置是否正确")
-                        return
-                    continue
-                logger.info('AI给出的答案:{}'.format(answer))
-                answer = self.parse_answer(answer)
-                if not answer:
-                    continue
+                
+                while True:
+                    try:
+                        answer = str(llm.ask(self.get_question_prompt())).strip()
+                    except Exception as e:
+                        logger.error(f"AI回答问题时发生错误: {str(e)}")
+                        sleep_time = math.pow(2, retry_count + 1);
+                        logger.info(f"正在重试({sleep_time:.0f}s)...")
+                        sleep(sleep_time)
+                        retry_count += 1
+                        if retry_count > 7:
+                            logger.error("重试次数过多，程序终止，请检查配置是否正确")
+                            return
+                        continue
+                    logger.info('AI给出的答案:{}'.format(answer))
+                    answer = self.parse_answer(answer)
+                    
+                    if not answer:
+                        if self.unrecognized_count >= 3:
+                            answer = self.random_answer()
+                        else:
+                            retry_count += 1
+                            if retry_count > 7:
+                                logger.error("重试次数过多，程序终止，请检查配置是否正确")
+                                return
+                            continue
+                    break
 
                 result = self.answers[answer-1]
                 if not self.submit_answer(result):
@@ -158,13 +172,20 @@ class QuizSession:
         except ValueError:
             match = re.search(r'回答[:：]\s*(\d+)', str(answer))
             if not match:
+                self.unrecognized_count += 1
                 logger.warning(f"AI回复了无关内容:[{answer}],正在重试,如果多次重试后还是未回答成功,请前往app手动回答这一题")
                 return None
             answer = int(match.group(1))
         if not (1 <= answer <= len(self.answers)):
+            self.unrecognized_count += 1
             logger.warning(f"无效的答案序号: {answer}")
             return None
         return answer
+
+    def random_answer(self):
+        random_choice = random.randint(1, len(self.answers))
+        logger.warning(f"无法识别答案已达{self.unrecognized_count}次，随机选择第{random_choice}个选项")
+        return random_choice
 
     def submit_answer(self, answer):
         """提交答案
